@@ -1,0 +1,1175 @@
+substitutions:
+  name: "frame-controller"
+  friendly_name: Frame Controller
+  comment: Ex-link interface for Samsung The Frame TV | Olimex ESP32-POE-16GB
+  area: Utility Room
+  # olimex esp32-poe uext interface: tx: GPIO4 | rx: GPIO36
+  # Use ColorControl app to enter service menu if necessary - https://github.com/Maassoft/ColorControl
+  # control->sub option.  Make sure rs232 jack: uart / EXT LINK: On / does not need USB Serial to be on if using the 3.5mm port
+
+packages:
+  common: !include modules/devices/olimex-esp32-poe-idf.yaml
+
+preferences:
+  # the default of 1min is far too short-flash chip rated for approx 100k writes
+  flash_write_interval: "8h"
+
+esp32:
+  flash_size: 16MB
+
+ethernet:
+  manual_ip:
+    static_ip: 192.168.4.162
+    subnet: 255.255.255.0
+    gateway: 192.168.4.1
+    dns1: 192.168.4.175
+
+logger:
+  level: DEBUG  # don't remove DEBUG - makes uart stream available in esphome logstream
+  logs:
+    component: ERROR  # suppress component took too long messages
+
+i2c: !remove
+
+esphome:
+  includes:
+    - hfiles/sagebrush_string.h
+  on_boot:
+    priority: -100
+    then:
+      - text_sensor.template.publish:
+          id: get_status
+          state: "Enable debugging switch in UI to see command log"
+      - script.execute: poll_tv
+
+#------------------ uart: samsung ex-link interface - rs232 for tv control and monitoring of state
+uart:
+  id: uart_bus
+  tx_pin: GPIO4
+  rx_pin: GPIO36
+  baud_rate: 9600
+  debug:
+    direction: BOTH
+    dummy_receiver: true
+    sequence:
+      - lambda: |-
+          // if sw_uart_debug_logging is On: print incoming messages in log for reverse engineering/debug
+          if (id(sw_uart_debug_logging).state) {
+            UARTDebug::log_hex(direction, bytes, ':');
+            if (direction == uart::UART_DIRECTION_RX)
+              id(get_status).publish_state(format_hex_pretty(bytes));
+          }
+      - lambda: >
+          if (direction == uart::UART_DIRECTION_RX) {
+            if (bytes.size() == 16) {                  // the get status hex should be 16 bits long
+              auto key = bytes[8];
+              auto value = bytes[12];
+
+              //------- power: 0x00
+              if (key == 0x00) {
+
+                // On: 0x05
+                if (value == 0x05) {
+                  if (!id(sw_tv_power).state)
+                    id(sw_tv_power).publish_state(true);
+                  if (!id(power_status).state)
+                    id(power_status).publish_state(true);
+                }
+
+                // Standby: 0x04 | Off: 0x08
+                else if (value == 0x04 || value == 0x08) {
+                  if (id(sw_tv_power).state)
+                    id(sw_tv_power).publish_state(false);
+                  if (!id(power_status).state)
+                    id(power_status).publish_state(false);
+                }
+              }
+
+              //-------- volume: 0x01
+              else if (key == 0x01) {
+                if (id(volume_status).state != value)
+                  id(volume_status).publish_state(value);
+              }
+
+              //--------- mute: 0x02
+              else if (key == 0x02) {
+                // 0x00 - not muted | 0x01 - muted
+                if (value == 0x00 && id(mute_status).state)
+                  id(mute_status).publish_state(false);
+                else if (value == 0x01 && !id(mute_status).state)
+                  id(mute_status).publish_state(true);
+              }
+
+              //--------channel: 0x03 -  channel/major/minor (x12=18,x01=1,x02=2)
+              else if (key == 0x03) {
+                uint8_t channelprimary = value;
+                uint8_t channelmajor = bytes[13];
+                uint8_t channelminor = bytes[14];
+                id(channel_status).publish_state(to_string(channelprimary)+"-"+to_string(channelmajor)+"-"+to_string(channelminor));
+              }
+
+              //---------- source: 0x04
+              else if (key == 0x04) {
+
+                if (value == 0x00) {
+                   // source tv: 03.0C.F1.03.0C.F5.08.F0.04.00.00.F1.00.00.00.0F (16)
+                  if (id(source_status).state != "TV")
+                    id(source_status).publish_state("TV");
+                  if (id(select_source).current_option() != "TV")
+                    id(select_source).publish_state("TV");
+                }
+                else if (value == 0x47) {
+                  if (id(source_status).state != "HDMI1")
+                    id(source_status).publish_state("HDMI1");
+                  if (id(select_source).current_option() != "HDMI1")
+                    id(select_source).publish_state("HDMI1");
+                }
+                else if (value == 0x48) {
+                  if (id(source_status).state != "HDMI2")
+                    id(source_status).publish_state("HDMI2");
+                  if (id(select_source).current_option() != "HDMI2")
+                    id(select_source).publish_state("HDMI2");
+                }
+                else if (value == 0x49) {
+                  if (id(source_status).state != "HDMI3")
+                    id(source_status).publish_state("HDMI3");
+                  if (id(select_source).current_option() != "HDMI3")
+                    id(select_source).publish_state("HDMI3");
+                }
+                else if (value == 0x50) {
+                  if (id(source_status).state != "HDMI4")
+                    id(source_status).publish_state("HDMI4");
+                  if (id(select_source).current_option() != "HDMI4")
+                    id(select_source).publish_state("HDMI4");
+                }
+                else if (value == 0x1C) {
+                  if (id(source_status).state != "AV1")
+                    id(source_status).publish_state("AV1");
+                  if (id(select_source).current_option() != "AV1")
+                    id(select_source).publish_state("AV1");
+                }
+                else if (value == 0x29) {
+                  if (id(source_status).state != "Component1")
+                    id(source_status).publish_state("Component1");
+                  if (id(select_source).current_option() != "Component1")
+                    id(select_source).publish_state("Component1");
+                }
+              }
+
+              //----------- picture mode: 0x07 - picture/art modes
+              // hdmi1/sheild: dynamic/filmmaker mode/movie/standard | hdmi2/pc: entertain/graphic
+
+              else if (key == 0x07) {
+                //ESP_LOGD("uart_receive","PICTURE MODE key/value %d : %d", key, value);
+                std::string src = id(source_status).state;
+                auto art_switch = id(sw_art_mode).state;
+
+                // Art Mode: 0x08
+                if (value == 0x08) {
+                  if (!art_switch)
+                    id(sw_art_mode).publish_state(true);
+                }
+                else {
+                  if (art_switch)
+                    id(sw_art_mode).publish_state(false);
+                }
+
+                // Dynamic: 0x00 - Shield
+                if (value == 0x00) {
+                  if (id(picture_mode).state != "Dynamic")
+                    id(picture_mode).publish_state("Dynamic");
+                }
+
+                // Standard: 0x01 - Shield
+                else if (value == 0x01) {
+                  if (src == "HDMI1" && id(picture_mode).state != "Standard")
+                    id(picture_mode).publish_state("Standard");
+                  else if (src == "HDMI2" && id(picture_mode).state != "Graphic[SDR]")
+                    id(picture_mode).publish_state("Graphic[SDR]");
+                }
+
+                // Movie: 0x02 - Shield
+                else if (value == 0x02) {
+                  if (id(picture_mode).state != "Movie")
+                    id(picture_mode).publish_state("Movie");
+                }
+
+                // Entertain[HDR]: 0x03 - PC(HDR)
+                else if (value == 0x03) {
+                  if (id(picture_mode).state != "Entertain[HDR]")
+                    id(picture_mode).publish_state("Entertain[HDR]");
+                }
+
+                // Graphic[HDR]: 0x04 - PC(HDR)
+                else if (value == 0x04) {
+                  if (id(picture_mode).state != "Graphic[HDR]")
+                    id(picture_mode).publish_state("Graphic[HDR]");
+                }
+
+                // Entertain: 0x05 - PC(STD)
+                else if (value == 0x05) {
+                  if (id(picture_mode).state != "Entertain[SDR]")
+                    id(picture_mode).publish_state("Entertain[SDR]");
+                }
+
+                // Hobgoblin: 0x06
+                else if (value == 0x06) {
+                  if (id(picture_mode).state != "Hobgoblin-06")
+                    id(picture_mode).publish_state("Hobgoblin-06");
+                }
+
+                // Hobgoblin: 0x07
+                else if (value == 0x07) {
+                  if (id(picture_mode).state != "Hobgoblin-07")
+                    id(picture_mode).publish_state("Hobgoblin-07");
+                }
+
+                // Art Mode: 0x08 - although this is already handled above, this is the value that is sent when art mode is selected
+                else if (value == 0x08) {
+                  if (id(picture_mode).state != "Art Mode")
+                    id(picture_mode).publish_state("Art Mode");
+                }
+
+                // Hobgoblin: 0x09
+                else if (value == 0x09) {
+                  if (id(picture_mode).state != "Hobgoblin-09")
+                    id(picture_mode).publish_state("Hobgoblin-09");
+                }
+
+                // Home Menu: 0x19 - home menu showing (25 base-10)
+                else if (value == 0x19) {
+                  if (id(picture_mode).state != "Home Menu")
+                    id(picture_mode).publish_state("Home Menu");
+                }
+
+                else {
+                  ESP_LOGW("uart_receive","Unknown Picture Mode %d : %d", key, value);
+                }
+              }
+
+              //----------------------- brightness: 0x0A
+              else if (key == 0xA) {
+                int bright = value * 2;                           // multiply to change scale from 0-50 to 0-100 (%)
+                int slider = id(num_disp_bright).state;
+                if (bright != slider) {                          // update the number only if there is a change
+                  auto call = id(num_disp_bright).make_call();
+                  call.set_value(bright);
+                  call.perform();
+                }
+              }
+              else {
+                ESP_LOGW("uart_receive","Unused key/value %d : %d", key, value);
+              }
+            }
+          }
+
+#------------------------------- select
+select:
+  id: select_source
+  platform: template
+  name: Source Select
+  icon: mdi:hdmi-port
+  options:
+    - "HDMI1"
+    - "HDMI2"
+    - "HDMI3"
+    - "HDMI4"
+    - "TV"
+  initial_option: "HDMI2"
+  optimistic: true
+  on_value:
+    then:
+      - lambda: |-
+          ESP_LOGI("select_source","Source chosen: %s (index %d)", x.c_str(), i);
+          if (x == "HDMI1")
+            id(btn_source_hdmi1).press();
+          else if (x == "HDMI2")
+            id(btn_source_hdmi2).press();
+          else if (x == "HDMI3")
+            id(btn_source_hdmi3).press();
+          else if (x == "HDMI4")
+            id(btn_source_hdmi4).press();
+          else if (x == "TV")
+            id(btn_source_tv).press();
+
+#------------------------------------------ number
+number:
+  # number: test numbers (ex-link) - used for changing queries to send to the tv to reverse engineer
+  - id: command_1
+    platform: template
+    name: "Test: Command 1"
+    min_value: 0
+    max_value: 255
+    mode: BOX
+    step: 1
+    restore_value: True
+    initial_value: 0
+    optimistic: true
+
+  - id: command_2
+    platform: template
+    name: "Test: Command 2"
+    min_value: 0
+    max_value: 255
+    mode: BOX
+    step: 1
+    restore_value: True
+    initial_value: 0
+    optimistic: true
+
+  - id: command_3
+    platform: template
+    name: "Test: Command 3"
+    min_value: 0
+    max_value: 255
+    mode: BOX
+    step: 1
+    restore_value: True
+    initial_value: 0
+    optimistic: true
+
+  - id: command_value
+    platform: template
+    name: "Test: Command Value"
+    min_value: 0
+    max_value: 255
+    mode: BOX
+    step: 1
+    restore_value: True
+    initial_value: 0
+    optimistic: true
+
+  # number: num_disp_bright - the brightness of 'The Frame' TV - gets updated from interval poll of tv
+  - id: num_disp_bright
+    platform: template
+    name: Display Brightness
+    icon: mdi:television-ambient-light
+    internal: False
+    update_interval: 20s
+    min_value: 0
+    max_value: 100
+    mode: SLIDER
+    unit_of_measurement: "%"
+    optimistic: True
+    step: 1
+    set_action:
+      - uart.write: !lambda |-
+          int bright = x / 2;           // convert from percent (100) to max 50 the tv takes
+          uint8_t head_1 = 8;           // fixed header
+          uint8_t head_2 = 34;          // fixed header
+          uint8_t cmd_1 = 11;           // menu: picture
+          uint8_t cmd_2 = 1;            // submenu: brightness
+          uint8_t cmd_3 = 0;            // submenu2:
+          uint8_t cmd_value = bright;   // value
+          uint8_t cmd_checksum = 256 - (head_1 + head_2 + cmd_1 + cmd_2 + cmd_3 + cmd_value);
+          return {head_1, head_2, cmd_1, cmd_2, cmd_3, cmd_value, cmd_checksum};
+
+#----------------------------------------------- binary_sensor
+binary_sensor:
+  # binary_sensor: power_status (ex-link) -  holds mute status of tv
+  - id: power_status
+    platform: template
+    name: Power Status
+    icon: mdi:power
+
+  # binary_sensor: mute_status (ex-link) -  holds mute status of tv
+  - id: mute_status
+    platform: template
+    name: Mute Status
+    icon: mdi:volume-mute
+
+#----------------------------------------------- button - many commands not needed for this project left disabled by defsult for possible future use
+button:
+  # button: test_command - used for testing sending custom commands to the tv by changing the command_x values in gui and pressing send
+  - id: test_command
+    platform: template
+    name: Test Command
+    on_press:
+      then:
+        - lambda: 'ESP_LOGI("btn_test_command","TEST COMMAND");'
+        - uart.write: !lambda |-
+            const uint8_t head_1 = 0x08;  // fixed header
+            const uint8_t head_2 = 0x22;  // fixed header
+            const uint8_t cmd_1 = static_cast<uint8_t>(id(command_1).state);  // 240 (F0) seems to be the query parameter?
+            const uint8_t cmd_2 = static_cast<uint8_t>(id(command_2).state);  // last experimented with 7 here
+            const uint8_t cmd_3 = static_cast<uint8_t>(id(command_3).state);
+            const uint8_t cmd_value = static_cast<uint8_t>(id(command_value).state);
+
+            const uint16_t sum = static_cast<uint16_t>(head_1) + head_2 + cmd_1 + cmd_2 + cmd_3 + cmd_value;
+            const uint8_t cmd_checksum = static_cast<uint8_t>(256 - sum);  // 7th byte
+
+            return {head_1, head_2, cmd_1, cmd_2, cmd_3, cmd_value, cmd_checksum};
+
+  # button: btn_poll_tv - poll the tv - used for testing, not really used in production
+  - id: btn_poll_tv
+    platform: template
+    name: "Test: Poll TV"
+    icon: mdi:update
+    on_press:
+      then:
+        - script.execute: poll_tv
+
+  #---------------------------------- button: get commands
+  # Get Command:
+  # TV Reaction
+  # Success / Fail _F1_ _Success_
+  # Data Length    _8_
+  # Command        _F0_ _0_ _0_ _0_
+  # Data Value     _5_ _0_ _0_
+  # Category       _Power_
+  # Current State  _Normal Mode_
+
+  - platform: uart
+    uart_id: uart_bus
+    name: Get Power
+    icon: mdi:update
+    data: [0x08, 0x22, 0xF0, 0x00, 0x00, 0x00, 0xE6]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: Get Brightness
+    icon: mdi:update
+    data: [0x08, 0x22, 0xF0, 0x0A, 0x00, 0x00, 0xDC]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: Get Picture Mode
+    icon: mdi:update
+    data: [0x08, 0x22, 0xF0, 0x07, 0x00, 0x00, 0xDF]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: Get Source
+    icon: mdi:update
+    data: [0x08, 0x22, 0xF0, 0x04, 0x00, 0x00, 0xE2]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: Get Volume
+    icon: mdi:update
+    data: [0x08, 0x22, 0xF0, 0x01, 0x00, 0x00, 0xE5]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: Get Mute
+    icon: mdi:update
+    data: [0x08, 0x22, 0xF0, 0x02, 0x00, 0x00, 0xE4]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: Get Channel
+    icon: mdi:update
+    data: [0x08, 0x22, 0xF0, 0x03, 0x00, 0x00, 0xE3]
+    disabled_by_default: true
+
+#---------------------------------- button: picture modes
+  - platform: uart
+    uart_id: uart_bus
+    name: "Picture Mode: Dynamic"
+    icon: mdi:image-outline
+    data: [0x08, 0x22, 0x0B, 0x00, 0x00, 0x00, 0xCB]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Picture Mode: Standard"
+    icon: mdi:image-outline
+    data: [0x08, 0x22, 0x0B, 0x00, 0x00, 0x01, 0xCA]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Picture Mode: Movie"
+    icon: mdi:image-outline
+    data: [0x08, 0x22, 0x0B, 0x00, 0x00, 0x02, 0xC9]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Picture Mode: Entertain"
+    icon: mdi:image-outline
+    data: [0x08, 0x22, 0x0B, 0x00, 0x00, 0x03, 0xC8]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Picture Mode: Graphic"
+    icon: mdi:image-outline
+    data: [0x08, 0x22, 0x0B, 0x00, 0x00, 0x04, 0xC7]
+
+#---------------------------------- button: power controls
+  - platform: uart
+    uart_id: uart_bus
+    name: "Power: On"
+    icon: mdi:power
+    data: [0x08, 0x22, 0x00, 0x00, 0x00, 0x02, 0xD4]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Power: Off"
+    icon: mdi:power-off
+    data: [0x08, 0x22, 0x00, 0x00, 0x00, 0x01, 0xD5]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Power: Toggle"
+    icon: mdi:toggle-switch-outline
+    data: [0x08, 0x22, 0x00, 0x00, 0x00, 0x00, 0xD6]
+    disabled_by_default: true
+
+#---------------------------------- button: volume controls
+  - platform: uart
+    uart_id: uart_bus
+    name: Volume Up
+    icon: mdi:volume-plus
+    data: [0x08, 0x22, 0x01, 0x00, 0x01, 0x00, 0xD4]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: Volume Down
+    icon: mdi:volume-minus
+    data: [0x08, 0x22, 0x01, 0x00, 0x02, 0x00, 0xD3]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: Mute
+    icon: mdi:volume-mute
+    data: [0x08, 0x22, 0x02, 0x00, 0x00, 0x00, 0xD4]
+
+  - platform: uart          # no state available
+    uart_id: uart_bus
+    name: "Sound: TV Speakers"
+    icon: mdi:speaker
+    data: [0x08, 0x22, 0x0C, 0x07, 0x00, 0x00, 0xC3]
+
+  - platform: uart          # no state available
+    uart_id: uart_bus
+    name: "Sound: Optical Out"
+    icon: mdi:audio-video
+    data: [0x08, 0x22, 0x0C, 0x07, 0x00, 0x01, 0xC2]      # there is no 0x02 - 0x01 is the end
+
+  - platform: uart          # no state available -  this is 'sound reset' in the docs, but it sets it back to HDMI eARC for me
+    uart_id: uart_bus
+    name: "Sound: Reset"
+    icon: mdi:reload
+    data: [0x08, 0x22, 0x0C, 0x09, 0x00, 0x00, 0xC1]
+
+  #-------------------------------------- button: sources
+  - id: btn_source_tv
+    platform: uart
+    uart_id: uart_bus
+    name: "Source: TV"
+    icon: mdi:source-branch
+    data: [0x08, 0x22, 0x0A, 0x00, 0x00, 0x00, 0xCC]
+    on_press:
+      then:
+        - delay: 200ms
+        - uart.write: [0x08, 0x22, 0xF0, 0x04, 0x00, 0x00, 0xE2]      # query source to update state
+
+  - id: btn_source_hdmi1
+    platform: uart
+    uart_id: uart_bus
+    name: "Source: HDMI 1"
+    icon: mdi:hdmi-port
+    data: [0x08, 0x22, 0x0A, 0x00, 0x05, 0x00, 0xC7]
+    on_press:
+      then:
+        - delay: 200ms
+        - uart.write: [0x08, 0x22, 0xF0, 0x04, 0x00, 0x00, 0xE2]      # query source to update state
+
+  - id: btn_source_hdmi2
+    platform: uart
+    uart_id: uart_bus
+    name: "Source: HDMI 2"
+    icon: mdi:hdmi-port
+    data: [0x08, 0x22, 0x0A, 0x00, 0x05, 0x01, 0xC6]
+    on_press:
+      then:
+        - delay: 200ms
+        - uart.write: [0x08, 0x22, 0xF0, 0x04, 0x00, 0x00, 0xE2]      # query source to update state
+
+  - id: btn_source_hdmi3
+    platform: uart
+    uart_id: uart_bus
+    name: "Source: HDMI 3"
+    icon: mdi:hdmi-port
+    data: [0x08, 0x22, 0x0A, 0x00, 0x05, 0x02, 0xC5]
+    on_press:
+      then:
+        - delay: 200ms
+        - uart.write: [0x08, 0x22, 0xF0, 0x04, 0x00, 0x00, 0xE2]      # query source to update state
+
+  - id: btn_source_hdmi4
+    platform: uart
+    uart_id: uart_bus
+    name: "Source: HDMI 4"
+    icon: mdi:hdmi-port
+    data: [0x08, 0x22, 0x0A, 0x00, 0x05, 0x03, 0xC4]
+    on_press:
+      then:
+        - delay: 200ms
+        - uart.write: [0x08, 0x22, 0xF0, 0x04, 0x00, 0x00, 0xE2]      # query source to update state
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Source: YouTube"
+    icon: mdi:youtube
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0xD8, 0xF1]
+    on_press:
+      then:
+        - delay: 200ms
+        - uart.write: [0x08, 0x22, 0xF0, 0x04, 0x00, 0x00, 0xE2]      # query source to update state
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Source: Netflix"
+    icon: mdi:netflix
+    disabled_by_default: true
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0xD7, 0xF2]
+    on_press:
+      then:
+        - delay: 200ms
+        - uart.write: [0x08, 0x22, 0xF0, 0x04, 0x00, 0x00, 0xE2]      # query source to update state
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Source: Prime"
+    disabled_by_default: true
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0xD6, 0xF3]
+    on_press:
+      then:
+        - delay: 200ms
+        - uart.write: [0x08, 0x22, 0xF0, 0x04, 0x00, 0x00, 0xE2]      # query source to update state
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Source: AV1"
+    icon: mdi:hdmi-port
+    data: [0x08, 0x22, 0x0A, 0x00, 0x01, 0x00, 0xCB]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Source: Component1"
+    icon: mdi:video-input-component
+    data: [0x08, 0x22, 0x0A, 0x00, 0x03, 0x00, 0xC9]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Source: Smart Hub"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x79, 0x50]
+    disabled_by_default: true
+
+  #-------------------------------------- button: key entry
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Digit 1"
+    icon: mdi:numeric-1
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x04, 0xC5]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Digit 2"
+    icon: mdi:numeric-2
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x05, 0xC4]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Digit 3"
+    icon: mdi:numeric-3
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x06, 0xC3]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Digit 4"
+    icon: mdi:numeric-4
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x08, 0xC1]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Digit 5"
+    icon: mdi:numeric-5
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x09, 0xC0]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Digit 6"
+    icon: mdi:numeric-6
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x0A, 0xBF]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Digit 7"
+    icon: mdi:numeric-7
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x0C, 0xBD]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Digit 8"
+    icon: mdi:numeric-8
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x0D, 0xBC]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Digit 9"
+    icon: mdi:numeric-9
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x0E, 0xBB]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Digit 0"
+    icon: mdi:numeric-0
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x11, 0xB8]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Digit -"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x23, 0xA6]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Tools"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x1F, 0xAA]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Info Display"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x1F, 0xAA]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Menu"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x1A, 0xAF]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Up"
+    icon: mdi:arrow-up
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x60, 0x69]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Down"
+    icon: mdi:arrow-down
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x61, 0x68]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Right"
+    icon: mdi:arrow-right
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x62, 0x67]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Left"
+    icon: mdi:arrow-left
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x65, 0x64]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Enter-OK"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x68, 0x61]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Return-Back"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x58, 0x17]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Exit"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x2D, 0x9C]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key Color: Red"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x6C, 0x5D]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key Color: Green"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x14, 0xB5]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key Color: Yellow"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x15, 0xB4]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key Color: Blue"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x16, 0xB3]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Picture Size"
+    data: [0x08, 0x22, 0x0B, 0x0A, 0x01, 0x05, 0xBB]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Menu: E-Manual"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x3F, 0x8A]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Menu: Search"
+    icon: mdi:text-search
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x73, 0x56]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Keypad"
+    disabled_by_default: true
+    data: [0x08, 0x22, 0x0B, 0x0A, 0x01, 0x05, 0xBB]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Menu: Caption"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x25, 0xA4]
+
+  #-------- button: unneeded - left for future - disabled by default
+  - platform: uart         # multi-track sound
+    uart_id: uart_bus
+    name: "Key: MTS"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x00, 0xC9]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Channel Up"
+    data: [0x08, 0x22, 0x03, 0x00, 0x01, 0x00, 0xD2]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Channel Down"
+    data: [0x08, 0x22, 0x03, 0x00, 0x02, 0x00, 0xD1]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Input Source Toggle"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x01, 0xC8]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Previous Channel"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x13, 0xB6]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Channel List"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x6B, 0x5E]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Key: Channel Guide"
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x4F, 0x7A]
+    disabled_by_default: true
+
+  - platform: uart
+    uart_id: uart_bus
+    name: STB           # set top box
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0xE0, 0xE9]
+    disabled_by_default: true
+
+  #-------------------------------------- button: media controls
+  - platform: uart
+    uart_id: uart_bus
+    name: "Media: Play"
+    icon: mdi:play
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x47, 0x82]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Media: Pause"
+    icon: mdi:pause
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x4A, 0x7F]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Media: Stop"
+    icon: mdi:stop
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x46, 0x83]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Media: Rewind"
+    icon: mdi:rewind
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x45, 0x84]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Media: Fast Forward"
+    icon: mdi:fast-forward
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x48, 0x81]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Media: Skip Back"
+    icon: mdi:skip-backward
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x50, 0x79]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Media: Skip Forward"
+    icon: mdi:skip-forward
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x4E, 0x7B]
+
+  - platform: uart
+    uart_id: uart_bus
+    name: "Media: Record"
+    icon: mdi:record
+    data: [0x08, 0x22, 0x0D, 0x00, 0x00, 0x49, 0x80]
+
+#----------------------------------------------------- switch
+switch:
+  # switch: sw_tv_power (ex-link) - turns tv on/off
+  - id: sw_tv_power
+    platform: template
+    name: Power
+    icon: mdi:power
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - uart.write: [0x08, 0x22, 0x00, 0x00, 0x00, 0x02, 0xd4]      # send power-on command
+      - delay: 200ms                                                # must have a delay
+      - lambda: 'id(tv_status).publish_state("On");'
+      - script.execute: poll_tv                                     # immediatly poll the tv to update important states without waiting for interval
+    turn_off_action:
+      - uart.write: [0x08, 0x22, 0x00, 0x00, 0x00, 0x01, 0xd5]      # send power-off command
+      - delay: 200ms
+      - switch.turn_off: sw_art_mode
+      - lambda: 'id(tv_status).publish_state("Off");'
+      - delay: 500ms
+      - script.execute: poll_tv
+
+  # switch: sw_art_mode - turns art mode on/off
+  - id: sw_art_mode
+    platform: template
+    name: Art Mode
+    icon: mdi:image-outline
+    optimistic: True
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - if:             # if the tv is off, turn it on
+          condition:
+            - switch.is_off: sw_tv_power
+          then:
+            - switch.turn_on: sw_tv_power
+            - delay: 5s
+      - uart.write: [0x08, 0x22, 0x0b, 0x0b, 0x0e, 0x01, 0xb1]
+      - lambda: 'id(picture_mode).publish_state("Art Mode");'
+      - lambda: 'id(tv_status).publish_state("Art Mode");'
+    turn_off_action:
+      - uart.write: [0x08, 0x22, 0x0b, 0x0b, 0x0e, 0x00, 0xb2]
+
+  # switch: sw_ambient_mode - turns ambient mode on/off
+  - id: sw_ambient_mode
+    platform: template
+    name: Ambient Mode
+    icon: mdi:image-outline
+    optimistic: True              # not updated by polling
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - uart.write: [0x08, 0x22, 0x0b, 0x0b, 0x10, 0x01, 0xaf]
+    turn_off_action:
+      - uart.write: [0x08, 0x22, 0x0b, 0x0b, 0x10, 0x00, 0xb0]
+
+  # switch: sw_ambient_light_sensor
+  - id: sw_ambient_light_sensor
+    platform: template
+    name: Ambient Eco Sensor
+    icon: mdi:sprout-outline
+    optimistic: True              # not updated by polling
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - uart.write: [0x08, 0x22, 0x0b, 0x0b, 0x0d, 0x01, 0xb2]
+    turn_off_action:
+      - uart.write: [0x08, 0x22, 0x0b, 0x0b, 0x0d, 0x00, 0xb3]
+
+  # switch: sw_hdr_plus
+  - id: sw_hdr_plus
+    platform: template
+    name: HDR+
+    icon: mdi:television-shimmer
+    optimistic: True              # not updated by polling
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - uart.write: [0x08, 0x22, 0x0b, 0x0b, 0x0b, 0x01, 0xb4]
+    turn_off_action:
+      - uart.write: [0x08, 0x22, 0x0b, 0x0b, 0x0b, 0x00, 0xb5]
+
+  # switch: sw_motion_lighting
+  - id: sw_motion_lighting
+    platform: template
+    name: Motion Lighting
+    icon: mdi:motion-outline
+    optimistic: True              # not updated by polling
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - uart.write: [0x08, 0x22, 0x0b, 0x07, 0x11, 0x01, 0xb2]
+    turn_off_action:
+      - uart.write: [0x08, 0x22, 0x0b, 0x07, 0x11, 0x00, 0xb3]
+
+  # switch: sw_auto_motion_plus
+  - id: sw_auto_motion_plus
+    platform: template
+    name: Auto Motion Plus
+    icon: mdi:motion-outline
+    optimistic: True      # not updated by polling
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - uart.write: [0x08, 0x22, 0x0b, 0x0a, 0x06, 0x02, 0xb9]
+    turn_off_action:
+      - uart.write: [0x08, 0x22, 0x0b, 0x0a, 0x06, 0x00, 0xbb]
+
+  # switch: sw_cmd_result_osd (ex-link) - toggles the annoying dimming of screen and acknowledgement of each command issued via exlink
+  - id: sw_cmd_result_osd
+    platform: template
+    name: Command Result OSD
+    icon: mdi:overscan
+    optimistic: True       # not updated by polling
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    turn_on_action:
+      - uart.write: [0x08, 0x22, 0x0e, 0x01, 0x00, 0x01, 0xc6]
+    turn_off_action:
+      - uart.write: [0x08, 0x22, 0x0e, 0x01, 0x00, 0x00, 0xc7]
+
+  # switch: sw_auto_poll_tv - tv will be polled at the interval in interval section below.  Usually just turned off during development to test commands
+  - id: sw_auto_poll_tv
+    platform: template
+    name: Auto Poll TV
+    icon: mdi:update
+    optimistic: True
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
+  # switch: sw_uart_debug_logging - should we display all uart traffic to log
+  - id: sw_uart_debug_logging
+    platform: template
+    name: UART Debug Logging
+    icon: mdi:bug-check-outline
+    optimistic: True
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+
+#------------------------------------------------------------- sensor
+sensor:
+  - id: !remove poe_voltage
+
+  # sensor: volume_status
+  - id: volume_status
+    platform: template
+    name: Volume Status
+    icon: mdi:volume-high
+    accuracy_decimals: 0
+    unit_of_measurement: "%"
+
+#---------------------------------------------------------- text_sensor
+text_sensor:
+  # text_sensor: tv_status - state of TV
+  - id: tv_status
+    platform: template
+    name: TV Status
+    icon: mdi:television
+    entity_category: diagnostic
+    update_interval: 15s
+    lambda: |-
+      if (id(sw_tv_power).state) {
+        if (id(sw_art_mode).state) {
+          if (id(tv_status).state != "Art Mode")
+            return {"Art Mode"};
+          else
+            return {};
+        }
+        else {
+          if (id(tv_status).state != "On")
+            return {"On"};
+          else
+            return {};
+        }
+      }
+      else {
+        if (id(tv_status).state != "Off")
+          return {"Off"};
+        else
+          return {};
+      }
+
+  # text_sensor: source_status - input source of the tv
+  - id: source_status
+    platform: template
+    name: Source Status
+    icon: mdi:source-branch
+    entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            if (x == id(select_source).current_option())
+              return;   // no change
+            ESP_LOGI("source_status", "Source changed to: %s", x.c_str());
+            id(select_source).publish_state(x);
+
+  # text_sensor: picture_mode - which picture mode / art mode
+  - id: picture_mode
+    platform: template
+    name: Picture Mode
+    icon: mdi:image-outline
+    entity_category: diagnostic
+
+  # text_sensor: channel_status - channel status of tv
+  - id: channel_status
+    platform: template
+    name: Channel Status
+    icon: mdi:television-guide
+    disabled_by_default: true
+    entity_category: diagnostic
+
+  # text_sensor: get_status (ex-link) - puts the most recent response to a query in a text_sensor - for reverse engineering/testing
+  - id: get_status
+    platform: template
+    name: Get Command Log
+    icon: mdi:math-log
+    entity_category: diagnostic
+
+#------------------------------------------------------- script
+script:
+  # script: poll_tv - ask the tv to deliver state updates for items below
+  - id: poll_tv
+    then:
+      - uart.write: [0x08, 0x22, 0xF0, 0x00, 0x00, 0x00, 0xE6]           # 0: query power state
+      - delay: 250ms
+      - if:
+          condition:
+            - switch.is_on: sw_tv_power
+          then:
+            - uart.write: [0x08, 0x22, 0xF0, 0x01, 0x00, 0x00, 0xE5]     # 1: query volume state
+            - delay: 170ms
+            - uart.write: [0x08, 0x22, 0xF0, 0x02, 0x00, 0x00, 0xE4]     # 2: query mute state
+            - delay: 170ms
+            # channel is #3
+            - uart.write: [0x08, 0x22, 0xF0, 0x04, 0x00, 0x00, 0xE2]     # 4: query source
+            - delay: 170ms
+            - uart.write: [0x08, 0x22, 0xF0, 0x07, 0x00, 0x00, 0xDF]     # 7: picture mode status / includes art mode
+            - delay: 170ms
+            - uart.write: [0x08, 0x22, 0xF0, 0x0A, 0x00, 0x00, 0xDC]     # 10: current brightness of tv
+            - delay: 170ms
+
+#------------------------------------------------------- interval
+interval:
+  - interval: 5s  # poll the tv every x seconds for state update
+    then:
+      - lambda: |-
+          if (id(sw_auto_poll_tv).state) {         // if auto-poll switch is on
+            id(poll_tv)->execute();                // poll the tv states
+          }
